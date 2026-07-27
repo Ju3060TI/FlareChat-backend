@@ -1,10 +1,8 @@
 // backend/src/index.js
-// Cloudflare Worker - MIT FIREBASE FEATURE-FLAG
-// Firebase wird NUR aktiviert, wenn die Secrets gesetzt sind.
+// Cloudflare Worker - MIT FIREBASE FEATURE-FLAG (Statische Imports)
 
-// Firebase-Admin nur importieren, wenn verfügbar (optional)
-let firebaseEnabled = false;
-let firebaseApp = null;
+import { initializeApp, getApps, getApp } from 'firebase-admin/app';
+import { getAuth } from 'firebase-admin/auth';
 
 export default {
   async fetch(request, env) {
@@ -35,7 +33,7 @@ export default {
     const firebaseEnabled = !!(env.FIREBASE_PROJECT_ID && env.FIREBASE_PRIVATE_KEY);
 
     // ============================================================
-    // REGISTER (immer D1, da Firebase kein eigenes Register braucht)
+    // REGISTER (immer D1)
     // ============================================================
     if (path === '/register' && method === 'POST') {
       const { username, password } = await request.json();
@@ -51,12 +49,10 @@ export default {
     }
 
     // ============================================================
-    // LOGIN (FALLBACK: D1-Passwort) 
-    // WIRD NUR GENUTZT, WENN FIREBASE DEAKTIVIERT IST
+    // LOGIN (FALLBACK: D1-Passwort)
     // ============================================================
     if (path === '/login' && method === 'POST') {
       if (firebaseEnabled) {
-        // Falls Firebase aktiv ist, lehnen wir den alten Login ab
         return textResponse('Please use Google Login (Firebase is enabled)', 403);
       }
 
@@ -79,17 +75,14 @@ export default {
     }
 
     // ============================================================
-    // 🔥 FIREBASE LOGIN (Wird NUR aktiv, wenn Firebase aktiviert ist)
+    // 🔥 FIREBASE LOGIN (NUR aktiv, wenn Secrets gesetzt sind)
     // ============================================================
     if (path === '/auth/login' && method === 'POST') {
       if (!firebaseEnabled) {
         return textResponse('Firebase is not enabled. Use /login instead.', 501);
       }
 
-      // Firebase-Admin dynamisch importieren (nur wenn aktiviert)
-      const { initializeApp, getApps, getApp } = await import('firebase-admin/app');
-      const { getAuth } = await import('firebase-admin/auth');
-
+      // Firebase initialisieren (nur einmal)
       if (!getApps().length) {
         initializeApp({
           projectId: env.FIREBASE_PROJECT_ID,
@@ -128,7 +121,7 @@ export default {
     }
 
     // ============================================================
-    // HEARTBEAT (Für D1)
+    // HEARTBEAT
     // ============================================================
     if (path === '/heartbeat' && method === 'POST') {
       const { username } = await request.json();
@@ -138,7 +131,7 @@ export default {
     }
 
     // ============================================================
-    // FRIENDS (wie gehabt)
+    // FRIENDS
     // ============================================================
     if (path === '/friends' && method === 'POST') {
       const { username } = await request.json();
