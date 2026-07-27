@@ -1,12 +1,12 @@
 # wrangler.toml
-name = "flarechat-backend"
+name = "flarechatbackend"
 main = "src/index.js"
 compatibility_date = "2024-12-18"
 
+# ============================================================
+# D1 DATABASE BINDING
+# ============================================================
 [[d1_databases]]
 binding = "DB"
-database_name = "flarechat-db"
-database_id = "DEINE_D1_DATABASE_ID_HIER"
-
-# Du musst die database_id durch deine tatsächliche D1-ID ersetzen.
-# Die findest du im Cloudflare Dashboard unter D1 -> deine Datenbank.
+database_name = "flarechat"
+database_id = "0811f1e4-1972-474a-a070-4a1098ab8edc"
