@@ -1,8 +1,15 @@
 // backend/src/index.js
-// Cloudflare Worker - MIT FIREBASE FEATURE-FLAG (Statische Imports)
+// Cloudflare Worker mit WebSocket-Unterstützung
 
 import { initializeApp, getApps, getApp } from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
+
+// ============================================================
+// WEBSOCKET CONNECTIONS (einfache In-Memory-Liste)
+// ============================================================
+// Hinweis: Für echte Produktion sollte ein Durable Object genutzt werden.
+// Aber für den Anfang reicht diese globale Map (läuft nur auf einem Worker).
+const activeConnections = new Map();
 
 export default {
   async fetch(request, env) {
@@ -28,12 +35,55 @@ export default {
     };
 
     // ============================================================
-    // 🔥 FIREBASE TOGGLE (Prüfen, ob Secrets gesetzt sind)
+    // 🔌 WEBSOCKET HANDSHAKE
+    // ============================================================
+    if (path === '/ws' && method === 'GET') {
+      // WebSocket Upgrade Header prüfen
+      const upgradeHeader = request.headers.get('Upgrade');
+      if (upgradeHeader !== 'websocket') {
+        return new Response('Expected WebSocket', { status: 400 });
+      }
+
+      // WebSocket Pair erstellen
+      const pair = new WebSocketPair();
+      const [client, server] = pair;
+
+      // Server-Seite: Verbindung akzeptieren
+      server.accept();
+
+      // Nutzer identifizieren (über Query-Parameter oder Header)
+      const username = url.searchParams.get('username');
+      if (username) {
+        activeConnections.set(username, server);
+        console.log(`🟢 WebSocket verbunden: ${username}`);
+      }
+
+      // Auf Nachrichten vom Client reagieren (optional)
+      server.addEventListener('message', (event) => {
+        // Hier könnte man Pings oder andere Nachrichten verarbeiten
+      });
+
+      // Verbindung schließen -> aus der Liste entfernen
+      server.addEventListener('close', () => {
+        if (username) {
+          activeConnections.delete(username);
+          console.log(`🔴 WebSocket getrennt: ${username}`);
+        }
+      });
+
+      return new Response(null, {
+        status: 101,
+        webSocket: client,
+      });
+    }
+
+    // ============================================================
+    // 🔥 FIREBASE TOGGLE
     // ============================================================
     const firebaseEnabled = !!(env.FIREBASE_PROJECT_ID && env.FIREBASE_PRIVATE_KEY);
 
     // ============================================================
-    // REGISTER (immer D1)
+    // REGISTER
     // ============================================================
     if (path === '/register' && method === 'POST') {
       const { username, password } = await request.json();
@@ -75,14 +125,13 @@ export default {
     }
 
     // ============================================================
-    // 🔥 FIREBASE LOGIN (NUR aktiv, wenn Secrets gesetzt sind)
+    // 🔥 FIREBASE LOGIN
     // ============================================================
     if (path === '/auth/login' && method === 'POST') {
       if (!firebaseEnabled) {
         return textResponse('Firebase is not enabled. Use /login instead.', 501);
       }
 
-      // Firebase initialisieren (nur einmal)
       if (!getApps().length) {
         initializeApp({
           projectId: env.FIREBASE_PROJECT_ID,
@@ -98,7 +147,6 @@ export default {
         const decodedToken = await getAuth().verifyIdToken(idToken);
         const { uid, email, name, picture } = decodedToken;
 
-        // Nutzer in D1 suchen oder neu anlegen
         let dbUser = await env.DB.prepare('SELECT * FROM users WHERE firebase_uid = ?').bind(uid).first();
         if (!dbUser) {
           const username = email.split('@')[0] || 'user_' + uid.slice(0, 6);
@@ -235,6 +283,21 @@ export default {
       await env.DB.prepare('INSERT INTO messages (sender_id, receiver_id, text, created_at) VALUES (?, ?, ?, ?)')
         .bind(sender.id, receiver.id, text, Date.now()).run();
 
+      // === NEU: WebSocket-Benachrichtigung ===
+      if (activeConnections.has(receiverUsername)) {
+        const ws = activeConnections.get(receiverUsername);
+        try {
+          ws.send(JSON.stringify({
+            type: 'new_message',
+            sender: senderUsername,
+            text: text,
+            timestamp: Date.now()
+          }));
+        } catch (e) {
+          console.error('WebSocket send failed:', e);
+        }
+      }
+
       return textResponse('OK');
     }
 
@@ -287,6 +350,26 @@ export default {
 
       await env.DB.prepare('INSERT INTO group_messages (group_id, sender_id, text, created_at) VALUES (?, ?, ?, ?)')
         .bind(groupId, sender.id, text, Date.now()).run();
+
+      // Gruppenmitglieder benachrichtigen (vereinfacht)
+      const members = await env.DB.prepare(
+        'SELECT u.username FROM users u JOIN group_members gm ON gm.user_id = u.id WHERE gm.group_id = ?'
+      ).bind(groupId).all();
+
+      members.results.forEach(m => {
+        if (activeConnections.has(m.username)) {
+          const ws = activeConnections.get(m.username);
+          try {
+            ws.send(JSON.stringify({
+              type: 'new_group_message',
+              groupId: groupId,
+              sender: senderUsername,
+              text: text,
+              timestamp: Date.now()
+            }));
+          } catch (e) {}
+        }
+      });
 
       return textResponse('OK');
     }
