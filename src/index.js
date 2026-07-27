@@ -1,6 +1,10 @@
 // backend/src/index.js
-// Cloudflare Worker - Light Version (OHNE Firebase)
-// Läuft mit dem bestehenden D1 Login (Username + Passwort)
+// Cloudflare Worker - MIT FIREBASE FEATURE-FLAG
+// Firebase wird NUR aktiviert, wenn die Secrets gesetzt sind.
+
+// Firebase-Admin nur importieren, wenn verfügbar (optional)
+let firebaseEnabled = false;
+let firebaseApp = null;
 
 export default {
   async fetch(request, env) {
@@ -26,7 +30,12 @@ export default {
     };
 
     // ============================================================
-    // REGISTER (wie gehabt)
+    // 🔥 FIREBASE TOGGLE (Prüfen, ob Secrets gesetzt sind)
+    // ============================================================
+    const firebaseEnabled = !!(env.FIREBASE_PROJECT_ID && env.FIREBASE_PRIVATE_KEY);
+
+    // ============================================================
+    // REGISTER (immer D1, da Firebase kein eigenes Register braucht)
     // ============================================================
     if (path === '/register' && method === 'POST') {
       const { username, password } = await request.json();
@@ -42,9 +51,15 @@ export default {
     }
 
     // ============================================================
-    // LOGIN (weiterhin mit Passwort - KEIN Firebase)
+    // LOGIN (FALLBACK: D1-Passwort) 
+    // WIRD NUR GENUTZT, WENN FIREBASE DEAKTIVIERT IST
     // ============================================================
     if (path === '/login' && method === 'POST') {
+      if (firebaseEnabled) {
+        // Falls Firebase aktiv ist, lehnen wir den alten Login ab
+        return textResponse('Please use Google Login (Firebase is enabled)', 403);
+      }
+
       const { username, password } = await request.json();
       if (!username || !password) return textResponse('Missing fields', 400);
       
@@ -64,7 +79,56 @@ export default {
     }
 
     // ============================================================
-    // HEARTBEAT
+    // 🔥 FIREBASE LOGIN (Wird NUR aktiv, wenn Firebase aktiviert ist)
+    // ============================================================
+    if (path === '/auth/login' && method === 'POST') {
+      if (!firebaseEnabled) {
+        return textResponse('Firebase is not enabled. Use /login instead.', 501);
+      }
+
+      // Firebase-Admin dynamisch importieren (nur wenn aktiviert)
+      const { initializeApp, getApps, getApp } = await import('firebase-admin/app');
+      const { getAuth } = await import('firebase-admin/auth');
+
+      if (!getApps().length) {
+        initializeApp({
+          projectId: env.FIREBASE_PROJECT_ID,
+          privateKey: env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+          clientEmail: env.FIREBASE_CLIENT_EMAIL,
+        });
+      }
+
+      const { idToken } = await request.json();
+      if (!idToken) return textResponse('Missing idToken', 400);
+
+      try {
+        const decodedToken = await getAuth().verifyIdToken(idToken);
+        const { uid, email, name, picture } = decodedToken;
+
+        // Nutzer in D1 suchen oder neu anlegen
+        let dbUser = await env.DB.prepare('SELECT * FROM users WHERE firebase_uid = ?').bind(uid).first();
+        if (!dbUser) {
+          const username = email.split('@')[0] || 'user_' + uid.slice(0, 6);
+          await env.DB.prepare(
+            'INSERT INTO users (firebase_uid, username, email, avatar_url, created_at) VALUES (?, ?, ?, ?, ?)'
+          ).bind(uid, username, email, picture || '', Date.now()).run();
+          dbUser = await env.DB.prepare('SELECT * FROM users WHERE firebase_uid = ?').bind(uid).first();
+        }
+
+        return jsonResponse({
+          success: true,
+          username: dbUser.username,
+          avatar_url: dbUser.avatar_url,
+          firebase_uid: dbUser.firebase_uid,
+        });
+      } catch (error) {
+        console.error('Firebase auth error:', error);
+        return textResponse('Invalid Firebase token', 401);
+      }
+    }
+
+    // ============================================================
+    // HEARTBEAT (Für D1)
     // ============================================================
     if (path === '/heartbeat' && method === 'POST') {
       const { username } = await request.json();
@@ -74,7 +138,7 @@ export default {
     }
 
     // ============================================================
-    // FRIENDS
+    // FRIENDS (wie gehabt)
     // ============================================================
     if (path === '/friends' && method === 'POST') {
       const { username } = await request.json();
