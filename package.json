@@ -1,0 +1,14 @@
+{
+  "name": "flarechat-backend",
+  "version": "1.0.0",
+  "main": "src/index.js",
+  "scripts": {
+    "deploy": "wrangler deploy"
+  },
+  "dependencies": {
+    "firebase-admin": "^12.0.0"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}
