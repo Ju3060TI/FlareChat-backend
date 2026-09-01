@@ -10,7 +10,7 @@ compatibility_flags = ["nodejs_compat"]
 # ============================================================
 [[d1_databases]]
 binding = "DB"
-database_name = "flarechat-db"
+database_name = "flarechat"
 database_id = "0811f1e4-1972-474a-a070-4a1098ab8edc"  # ← DEINE ECHTE ID!
 
 # ============================================================
