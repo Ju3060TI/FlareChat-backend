@@ -311,4 +311,4 @@ export default {
 // ============================================================
 // EXPORT DURABLE OBJECT
 // ============================================================
-export { ChatRoom } from './durable-objects/chat-room.js';
+export { ChatRoom } from '/src/durable-objects/chat-room.js';
