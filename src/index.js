@@ -22,6 +22,172 @@ const textResponse = (text, status = 200) => {
 };
 
 // ============================================================
+// DURABLE OBJECT – ChatRoom (DIREKT IN DER DATEI)
+// ============================================================
+export class ChatRoom {
+  constructor(state, env) {
+    this.state = state;
+    this.env = env;
+    this.sessions = new Map(); // username -> WebSocket
+    this.roomId = state.id.toString();
+  }
+
+  async fetch(request) {
+    const url = new URL(request.url);
+    const path = url.pathname;
+
+    if (path === '/ws') {
+      const username = url.searchParams.get('username');
+      if (!username) {
+        return new Response('Missing username', { status: 400 });
+      }
+
+      const pair = new WebSocketPair();
+      const [client, server] = Object.values(pair);
+
+      this.state.acceptWebSocket(server);
+      this.sessions.set(username, server);
+
+      console.log(`🟢 [Room ${this.roomId}] ${username} connected`);
+
+      this.broadcast({
+        type: 'user_joined',
+        username: username,
+        timestamp: Date.now()
+      }, username);
+
+      return new Response(null, {
+        status: 101,
+        webSocket: client,
+      });
+    }
+
+    if (path === '/messages' && request.method === 'GET') {
+      const messages = await this.state.storage.get('messages') || [];
+      return new Response(JSON.stringify(messages), {
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    if (path === '/send' && request.method === 'POST') {
+      try {
+        const { sender, text } = await request.json();
+        if (!sender || !text) {
+          return new Response(JSON.stringify({ error: 'Missing fields' }), {
+            status: 400,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+
+        const messages = await this.state.storage.get('messages') || [];
+        const newMessage = {
+          id: Date.now().toString(36) + Math.random().toString(36).substr(2, 5),
+          sender: sender,
+          text: text,
+          timestamp: Date.now(),
+          type: 'text'
+        };
+        messages.push(newMessage);
+
+        if (messages.length > 1000) {
+          messages.splice(0, messages.length - 1000);
+        }
+        await this.state.storage.put('messages', messages);
+
+        this.broadcast({
+          type: 'new_message',
+          ...newMessage
+        });
+
+        return new Response(JSON.stringify({ success: true }), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      } catch (error) {
+        return new Response(JSON.stringify({ error: 'Invalid request' }), {
+          status: 400,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+    }
+
+    return new Response('Not found', { status: 404 });
+  }
+
+  async webSocketMessage(ws, message) {
+    try {
+      const data = JSON.parse(message);
+
+      const messages = await this.state.storage.get('messages') || [];
+      const newMessage = {
+        id: Date.now().toString(36) + Math.random().toString(36).substr(2, 5),
+        sender: data.sender || 'unknown',
+        text: data.text,
+        timestamp: Date.now(),
+        type: data.type || 'text'
+      };
+
+      messages.push(newMessage);
+
+      if (messages.length > 1000) {
+        messages.splice(0, messages.length - 1000);
+      }
+      await this.state.storage.put('messages', messages);
+
+      this.broadcast({
+        type: 'new_message',
+        ...newMessage
+      }, data.sender);
+
+    } catch (error) {
+      console.error('Fehler beim Verarbeiten der Nachricht:', error);
+    }
+  }
+
+  async webSocketClose(ws, code, reason, wasClean) {
+    let disconnectedUser = null;
+    for (const [username, session] of this.sessions) {
+      if (session === ws) {
+        disconnectedUser = username;
+        break;
+      }
+    }
+
+    if (disconnectedUser) {
+      this.sessions.delete(disconnectedUser);
+      console.log(`🔴 [Room ${this.roomId}] ${disconnectedUser} disconnected`);
+
+      this.broadcast({
+        type: 'user_left',
+        username: disconnectedUser,
+        timestamp: Date.now()
+      });
+    }
+  }
+
+  async webSocketError(ws, error) {
+    console.error(`⚠️ [Room ${this.roomId}] WebSocket error:`, error);
+    for (const [username, session] of this.sessions) {
+      if (session === ws) {
+        this.sessions.delete(username);
+        break;
+      }
+    }
+  }
+
+  broadcast(data, excludeSender = null) {
+    const message = JSON.stringify(data);
+    for (const [username, ws] of this.sessions) {
+      if (username === excludeSender) continue;
+      try {
+        ws.send(message);
+      } catch (e) {
+        console.error(`Broadcast an ${username} fehlgeschlagen:`, e);
+      }
+    }
+  }
+}
+
+// ============================================================
 // MAIN WORKER
 // ============================================================
 export default {
@@ -30,14 +196,10 @@ export default {
     const path = url.pathname;
     const method = request.method;
 
-    // CORS Preflight
     if (method === 'OPTIONS') {
       return new Response(null, { status: 204, headers: corsHeaders });
     }
 
-    // ============================================================
-    // 🔌 WEBSOCKET HANDSHAKE (mit Durable Object)
-    // ============================================================
     if (path === '/ws' && method === 'GET') {
       const roomName = url.searchParams.get('room');
       const username = url.searchParams.get('username');
@@ -201,7 +363,7 @@ export default {
     }
 
     // ============================================================
-    // SEND (HTTP-Fallback, wenn WebSocket nicht verfügbar)
+    // SEND (HTTP-Fallback)
     // ============================================================
     if (path === '/send' && method === 'POST') {
       const { senderUsername, receiverUsername, text } = await request.json();
@@ -211,11 +373,9 @@ export default {
       const receiver = await env.DB.prepare('SELECT id FROM users WHERE username = ?').bind(receiverUsername).first();
       if (!sender || !receiver) return textResponse('User not found', 404);
 
-      // In D1 speichern
       await env.DB.prepare('INSERT INTO messages (sender_id, receiver_id, text, created_at) VALUES (?, ?, ?, ?)')
         .bind(sender.id, receiver.id, text, Date.now()).run();
 
-      // Versuchen, über Durable Object zu senden (für Echtzeit)
       try {
         const roomName = `dm_${[senderUsername, receiverUsername].sort().join('_')}`;
         const roomId = env.CHAT_ROOM.idFromName(roomName);
@@ -283,7 +443,6 @@ export default {
       await env.DB.prepare('INSERT INTO group_messages (group_id, sender_id, text, created_at) VALUES (?, ?, ?, ?)')
         .bind(groupId, sender.id, text, Date.now()).run();
 
-      // Versuchen, über Durable Object zu senden
       try {
         const roomName = `group_${groupId}`;
         const roomId = env.CHAT_ROOM.idFromName(roomName);
@@ -307,8 +466,3 @@ export default {
     return new Response('Not found', { status: 404, headers: corsHeaders });
   }
 };
-
-// ============================================================
-// EXPORT DURABLE OBJECT
-// ============================================================
-export { ChatRoom } from '/src/durable-objects/chat-room.js';
