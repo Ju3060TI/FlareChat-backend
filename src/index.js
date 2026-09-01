@@ -1,18 +1,12 @@
 // src/index.js
-// Cloudflare Worker mit WebSocket-Unterstützung (Durable Objects)
+// FlareChat mit SQLite-Backend für kostenlosen Plan
 
-// ============================================================
-// CORS-HEADER
-// ============================================================
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type',
 };
 
-// ============================================================
-// HELPER-FUNKTIONEN
-// ============================================================
 const jsonResponse = (data, status = 200) => {
   return new Response(JSON.stringify(data), { status, headers: corsHeaders });
 };
@@ -22,14 +16,26 @@ const textResponse = (text, status = 200) => {
 };
 
 // ============================================================
-// DURABLE OBJECT – ChatRoom (DIREKT IN DER DATEI)
+// DURABLE OBJECT MIT SQLITE
 // ============================================================
 export class ChatRoom {
   constructor(state, env) {
     this.state = state;
     this.env = env;
-    this.sessions = new Map(); // username -> WebSocket
+    this.sessions = new Map();
     this.roomId = state.id.toString();
+    this.sql = state.storage.sql;
+
+    // Tabelle erstellen
+    this.sql.exec(`
+      CREATE TABLE IF NOT EXISTS messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        sender TEXT NOT NULL,
+        text TEXT NOT NULL,
+        timestamp INTEGER NOT NULL,
+        type TEXT DEFAULT 'text'
+      )
+    `);
   }
 
   async fetch(request) {
@@ -63,8 +69,8 @@ export class ChatRoom {
     }
 
     if (path === '/messages' && request.method === 'GET') {
-      const messages = await this.state.storage.get('messages') || [];
-      return new Response(JSON.stringify(messages), {
+      const result = this.sql.exec('SELECT * FROM messages ORDER BY timestamp ASC LIMIT 100').toArray();
+      return new Response(JSON.stringify(result), {
         headers: { 'Content-Type': 'application/json' },
       });
     }
@@ -79,24 +85,20 @@ export class ChatRoom {
           });
         }
 
-        const messages = await this.state.storage.get('messages') || [];
-        const newMessage = {
-          id: Date.now().toString(36) + Math.random().toString(36).substr(2, 5),
+        this.sql.exec(
+          'INSERT INTO messages (sender, text, timestamp, type) VALUES (?, ?, ?, ?)',
+          sender,
+          text,
+          Date.now(),
+          'text'
+        );
+
+        this.broadcast({
+          type: 'new_message',
           sender: sender,
           text: text,
           timestamp: Date.now(),
           type: 'text'
-        };
-        messages.push(newMessage);
-
-        if (messages.length > 1000) {
-          messages.splice(0, messages.length - 1000);
-        }
-        await this.state.storage.put('messages', messages);
-
-        this.broadcast({
-          type: 'new_message',
-          ...newMessage
         });
 
         return new Response(JSON.stringify({ success: true }), {
@@ -117,29 +119,24 @@ export class ChatRoom {
     try {
       const data = JSON.parse(message);
 
-      const messages = await this.state.storage.get('messages') || [];
-      const newMessage = {
-        id: Date.now().toString(36) + Math.random().toString(36).substr(2, 5),
+      this.sql.exec(
+        'INSERT INTO messages (sender, text, timestamp, type) VALUES (?, ?, ?, ?)',
+        data.sender || 'unknown',
+        data.text,
+        Date.now(),
+        data.type || 'text'
+      );
+
+      this.broadcast({
+        type: 'new_message',
         sender: data.sender || 'unknown',
         text: data.text,
         timestamp: Date.now(),
         type: data.type || 'text'
-      };
-
-      messages.push(newMessage);
-
-      if (messages.length > 1000) {
-        messages.splice(0, messages.length - 1000);
-      }
-      await this.state.storage.put('messages', messages);
-
-      this.broadcast({
-        type: 'new_message',
-        ...newMessage
       }, data.sender);
 
     } catch (error) {
-      console.error('Fehler beim Verarbeiten der Nachricht:', error);
+      console.error('Fehler:', error);
     }
   }
 
@@ -200,6 +197,7 @@ export default {
       return new Response(null, { status: 204, headers: corsHeaders });
     }
 
+    // WEBSOCKET
     if (path === '/ws' && method === 'GET') {
       const roomName = url.searchParams.get('room');
       const username = url.searchParams.get('username');
@@ -223,9 +221,7 @@ export default {
       return roomObject.fetch(modifiedRequest);
     }
 
-    // ============================================================
     // REGISTER
-    // ============================================================
     if (path === '/register' && method === 'POST') {
       const { username, password } = await request.json();
       if (!username || !password) return textResponse('Missing fields', 400);
@@ -239,9 +235,7 @@ export default {
       return jsonResponse({ success: true });
     }
 
-    // ============================================================
     // LOGIN
-    // ============================================================
     if (path === '/login' && method === 'POST') {
       const { username, password } = await request.json();
       if (!username || !password) return textResponse('Missing fields', 400);
@@ -261,9 +255,7 @@ export default {
       });
     }
 
-    // ============================================================
     // HEARTBEAT
-    // ============================================================
     if (path === '/heartbeat' && method === 'POST') {
       const { username } = await request.json();
       if (!username) return textResponse('Missing username', 400);
@@ -271,9 +263,7 @@ export default {
       return textResponse('OK');
     }
 
-    // ============================================================
     // FRIENDS
-    // ============================================================
     if (path === '/friends' && method === 'POST') {
       const { username } = await request.json();
       if (!username) return textResponse('Missing username', 400);
@@ -298,9 +288,7 @@ export default {
       return jsonResponse({ friends: friends.results, requests: requests.results });
     }
 
-    // ============================================================
     // ADD FRIEND
-    // ============================================================
     if (path === '/add-friend' && method === 'POST') {
       const { myUsername, friendUsername } = await request.json();
       if (!myUsername || !friendUsername) return textResponse('Missing fields', 400);
@@ -319,9 +307,7 @@ export default {
       return textResponse('Friend request sent');
     }
 
-    // ============================================================
     // RESPOND FRIEND
-    // ============================================================
     if (path === '/respond-friend' && method === 'POST') {
       const { myUsername, requesterUsername, accept } = await request.json();
       if (!myUsername || !requesterUsername) return textResponse('Missing fields', 400);
@@ -340,9 +326,7 @@ export default {
       }
     }
 
-    // ============================================================
     // MESSAGES
-    // ============================================================
     if (path === '/messages' && method === 'POST') {
       const { myUsername, otherUsername } = await request.json();
       if (!myUsername || !otherUsername) return textResponse('Missing fields', 400);
@@ -362,9 +346,7 @@ export default {
       return jsonResponse(msgs.results);
     }
 
-    // ============================================================
     // SEND (HTTP-Fallback)
-    // ============================================================
     if (path === '/send' && method === 'POST') {
       const { senderUsername, receiverUsername, text } = await request.json();
       if (!senderUsername || !receiverUsername || !text) return textResponse('Missing fields', 400);
@@ -393,9 +375,7 @@ export default {
       return textResponse('OK');
     }
 
-    // ============================================================
     // GROUPS
-    // ============================================================
     if (path === '/my-groups' && method === 'POST') {
       const { username } = await request.json();
       if (!username) return textResponse('Missing username', 400);
@@ -412,9 +392,7 @@ export default {
       return jsonResponse(groups.results);
     }
 
-    // ============================================================
     // GROUP MESSAGES
-    // ============================================================
     if (path === '/group-messages' && method === 'POST') {
       const { groupId } = await request.json();
       if (!groupId) return textResponse('Missing groupId', 400);
@@ -430,9 +408,7 @@ export default {
       return jsonResponse(msgs.results);
     }
 
-    // ============================================================
     // GROUP SEND
-    // ============================================================
     if (path === '/group-send' && method === 'POST') {
       const { groupId, senderUsername, text } = await request.json();
       if (!groupId || !senderUsername || !text) return textResponse('Missing fields', 400);
@@ -460,9 +436,6 @@ export default {
       return textResponse('OK');
     }
 
-    // ============================================================
-    // FALLBACK
-    // ============================================================
     return new Response('Not found', { status: 404, headers: corsHeaders });
   }
 };
