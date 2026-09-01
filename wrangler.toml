@@ -1,13 +1,33 @@
 # wrangler.toml
-name = "flarechatbackend"
-main = "src/index.js"
-compatibility_date = "2024-12-18"
-compatibility_flags = ["nodejs_compat"]
 
-# ============================================================
-# D1 DATABASE BINDING
-# ============================================================
+name = "flarechat-backend"
+main = "src/index.js"
+compatibility_date = "2024-01-01"
+
+# D1-Datenbank
 [[d1_databases]]
 binding = "DB"
-database_name = "flarechat"
-database_id = "0811f1e4-1972-474a-a070-4a1098ab8edc"
+database_name = "flarechat-db"
+database_id = "deine-d1-datenbank-id"
+
+# ============================================================
+# DURABLE OBJECT BINDING
+# ============================================================
+[[durable_objects.bindings]]
+name = "CHAT_ROOM"
+class_name = "ChatRoom"
+
+# ============================================================
+# MIGRATION: SQLite-Datenbank für Durable Object
+# ============================================================
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["ChatRoom"]
+
+# ============================================================
+# UMWELTVARIABLEN
+# ============================================================
+[vars]
+FIREBASE_PROJECT_ID = "dein-project-id"
+FIREBASE_PRIVATE_KEY = "dein-private-key"
+FIREBASE_CLIENT_EMAIL = "deine-email@example.com"
