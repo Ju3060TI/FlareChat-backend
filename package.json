@@ -8,9 +8,6 @@
     "dev": "wrangler dev",
     "deploy": "wrangler deploy --minify"
   },
-  "dependencies": {
-    "firebase-admin": "^11.0.0"
-  },
   "devDependencies": {
     "wrangler": "^3.0.0"
   }
