@@ -13,6 +13,7 @@ export class ChatRoom {
     const url = new URL(request.url);
     const path = url.pathname;
 
+    // --- WebSocket-Handshake ---
     if (path === '/ws') {
       const username = url.searchParams.get('username');
       if (!username) {
@@ -39,6 +40,7 @@ export class ChatRoom {
       });
     }
 
+    // --- Nachrichtenverlauf abrufen ---
     if (path === '/messages' && request.method === 'GET') {
       const messages = await this.state.storage.get('messages') || [];
       return new Response(JSON.stringify(messages), {
@@ -46,6 +48,7 @@ export class ChatRoom {
       });
     }
 
+    // --- Nachricht senden (via HTTP) ---
     if (path === '/send' && request.method === 'POST') {
       try {
         const { sender, text } = await request.json();
