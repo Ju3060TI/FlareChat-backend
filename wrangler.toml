@@ -1,17 +1,9 @@
 # wrangler.toml
-# FlareChat Backend – mit Durable Objects, D1 und ESModule-Regeln
 
 name = "flarechat-backend"
 main = "src/index.js"
-compatibility_date = "2024-01-01"
+compatibility_date = "2025-04-01"
 compatibility_flags = ["nodejs_compat"]
-
-# ============================================================
-# ESModule-Regeln (PFICHT für Durable Objects!)
-# ============================================================
-rules = [
-  { type = "ESModule", globs = ["**/*.js"] }
-]
 
 # ============================================================
 # D1 DATABASE
@@ -19,7 +11,7 @@ rules = [
 [[d1_databases]]
 binding = "DB"
 database_name = "flarechat-db"
-database_id = "deine-d1-datenbank-id"  # ← HIER DEINE ECHTE ID EINTRAGEN!
+database_id = "deine-d1-datenbank-id"
 
 # ============================================================
 # DURABLE OBJECT BINDING
@@ -29,22 +21,11 @@ name = "CHAT_ROOM"
 class_name = "ChatRoom"
 
 # ============================================================
-# MIGRATION: SQLite-Datenbank für Durable Object
+# MIGRATION: SQLite für Durable Object
 # ============================================================
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["ChatRoom"]
 
-# ============================================================
-# ENTWICKLUNG (OPTIONAL)
-# ============================================================
 [dev]
 port = 8787
-
-# ============================================================
-# UMWELTVARIABLEN (OPTIONAL – Firebase AUSKOMMENTIERT)
-# ============================================================
-# [vars]
-# FIREBASE_PROJECT_ID = "dein-project-id"
-# FIREBASE_PRIVATE_KEY = "dein-private-key"
-# FIREBASE_CLIENT_EMAIL = "deine-email@example.com"
