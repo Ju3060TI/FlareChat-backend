@@ -1,14 +1,28 @@
 // src/index.js
-// FlareChat mit SQLite-Backend für kostenlosen Plan
+// Cloudflare Worker mit WebSocket-Unterstützung (Durable Objects)
+// CORS-Header für alle Anfragen – inkl. OPTIONS-Preflight
 
+// ============================================================
+// CORS-HEADER (KOMPLETT)
+// ============================================================
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+  'Access-Control-Max-Age': '86400',
 };
 
+// ============================================================
+// HELPER-FUNKTIONEN
+// ============================================================
 const jsonResponse = (data, status = 200) => {
-  return new Response(JSON.stringify(data), { status, headers: corsHeaders });
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: {
+      ...corsHeaders,
+      'Content-Type': 'application/json',
+    },
+  });
 };
 
 const textResponse = (text, status = 200) => {
@@ -16,24 +30,24 @@ const textResponse = (text, status = 200) => {
 };
 
 // ============================================================
-// DURABLE OBJECT MIT SQLITE
+// DURABLE OBJECT – ChatRoom (MIT SQLITE-BACKEND)
 // ============================================================
 export class ChatRoom {
   constructor(state, env) {
     this.state = state;
     this.env = env;
-    this.sessions = new Map();
+    this.sessions = new Map(); // username -> WebSocket
     this.roomId = state.id.toString();
     this.sql = state.storage.sql;
 
-    // Tabelle erstellen
+    // Tabelle erstellen (falls nicht vorhanden)
     this.sql.exec(`
       CREATE TABLE IF NOT EXISTS messages (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         sender TEXT NOT NULL,
         text TEXT NOT NULL,
         timestamp INTEGER NOT NULL,
-        type TEXT DEFAULT 'text'
+        msgType TEXT DEFAULT 'text'
       )
     `);
   }
@@ -42,6 +56,7 @@ export class ChatRoom {
     const url = new URL(request.url);
     const path = url.pathname;
 
+    // --- WebSocket-Handshake ---
     if (path === '/ws') {
       const username = url.searchParams.get('username');
       if (!username) {
@@ -56,11 +71,14 @@ export class ChatRoom {
 
       console.log(`🟢 [Room ${this.roomId}] ${username} connected`);
 
-      this.broadcast({
-        type: 'user_joined',
-        username: username,
-        timestamp: Date.now()
-      }, username);
+      this.broadcast(
+        {
+          type: 'user_joined',
+          username: username,
+          timestamp: Date.now(),
+        },
+        username
+      );
 
       return new Response(null, {
         status: 101,
@@ -68,6 +86,7 @@ export class ChatRoom {
       });
     }
 
+    // --- Nachrichtenverlauf abrufen (SQL) ---
     if (path === '/messages' && request.method === 'GET') {
       const result = this.sql.exec('SELECT * FROM messages ORDER BY timestamp ASC LIMIT 100').toArray();
       return new Response(JSON.stringify(result), {
@@ -75,6 +94,7 @@ export class ChatRoom {
       });
     }
 
+    // --- Nachricht senden (via HTTP, SQL-Insert) ---
     if (path === '/send' && request.method === 'POST') {
       try {
         const { sender, text } = await request.json();
@@ -85,8 +105,9 @@ export class ChatRoom {
           });
         }
 
+        // Einzelnen Insert mit Parametern (schützt vor SQL-Injection)
         this.sql.exec(
-          'INSERT INTO messages (sender, text, timestamp, type) VALUES (?, ?, ?, ?)',
+          'INSERT INTO messages (sender, text, timestamp, msgType) VALUES (?, ?, ?, ?)',
           sender,
           text,
           Date.now(),
@@ -98,7 +119,7 @@ export class ChatRoom {
           sender: sender,
           text: text,
           timestamp: Date.now(),
-          type: 'text'
+          msgType: 'text',
         });
 
         return new Response(JSON.stringify({ success: true }), {
@@ -115,31 +136,35 @@ export class ChatRoom {
     return new Response('Not found', { status: 404 });
   }
 
+  // --- WebSocket-Nachricht empfangen (SQL-Insert) ---
   async webSocketMessage(ws, message) {
     try {
       const data = JSON.parse(message);
 
       this.sql.exec(
-        'INSERT INTO messages (sender, text, timestamp, type) VALUES (?, ?, ?, ?)',
+        'INSERT INTO messages (sender, text, timestamp, msgType) VALUES (?, ?, ?, ?)',
         data.sender || 'unknown',
         data.text,
         Date.now(),
         data.type || 'text'
       );
 
-      this.broadcast({
-        type: 'new_message',
-        sender: data.sender || 'unknown',
-        text: data.text,
-        timestamp: Date.now(),
-        type: data.type || 'text'
-      }, data.sender);
-
+      this.broadcast(
+        {
+          type: 'new_message',
+          sender: data.sender || 'unknown',
+          text: data.text,
+          timestamp: Date.now(),
+          msgType: data.type || 'text',
+        },
+        data.sender
+      );
     } catch (error) {
-      console.error('Fehler:', error);
+      console.error('Fehler beim Verarbeiten der Nachricht:', error);
     }
   }
 
+  // --- Verbindung geschlossen ---
   async webSocketClose(ws, code, reason, wasClean) {
     let disconnectedUser = null;
     for (const [username, session] of this.sessions) {
@@ -156,11 +181,12 @@ export class ChatRoom {
       this.broadcast({
         type: 'user_left',
         username: disconnectedUser,
-        timestamp: Date.now()
+        timestamp: Date.now(),
       });
     }
   }
 
+  // --- WebSocket-Fehler ---
   async webSocketError(ws, error) {
     console.error(`⚠️ [Room ${this.roomId}] WebSocket error:`, error);
     for (const [username, session] of this.sessions) {
@@ -171,6 +197,7 @@ export class ChatRoom {
     }
   }
 
+  // --- Broadcast an alle ---
   broadcast(data, excludeSender = null) {
     const message = JSON.stringify(data);
     for (const [username, ws] of this.sessions) {
@@ -193,11 +220,19 @@ export default {
     const path = url.pathname;
     const method = request.method;
 
+    // ============================================================
+    // CORS PREFLIGHT (OPTIONS) – MUSS ALS ERSTES KOMMEN!
+    // ============================================================
     if (method === 'OPTIONS') {
-      return new Response(null, { status: 204, headers: corsHeaders });
+      return new Response(null, {
+        status: 204,
+        headers: corsHeaders,
+      });
     }
 
-    // WEBSOCKET
+    // ============================================================
+    // WEBSOCKET HANDSHAKE (mit Durable Object)
+    // ============================================================
     if (path === '/ws' && method === 'GET') {
       const roomName = url.searchParams.get('room');
       const username = url.searchParams.get('username');
@@ -221,54 +256,74 @@ export default {
       return roomObject.fetch(modifiedRequest);
     }
 
+    // ============================================================
     // REGISTER
+    // ============================================================
     if (path === '/register' && method === 'POST') {
       const { username, password } = await request.json();
       if (!username || !password) return textResponse('Missing fields', 400);
       if (username.length < 3 || username.length > 20) return textResponse('Username length 3-20', 400);
       if (!/^[a-zA-Z0-9_.-]+$/.test(username)) return textResponse('Invalid characters', 400);
-      
-      const existing = await env.DB.prepare('SELECT id FROM users WHERE username = ?').bind(username).first();
+
+      const existing = await env.DB.prepare('SELECT id FROM users WHERE username = ?')
+        .bind(username)
+        .first();
       if (existing) return textResponse('User already exists', 409);
-      
-      await env.DB.prepare('INSERT INTO users (username, password, avatar_url) VALUES (?, ?, ?)').bind(username, password, '').run();
+
+      await env.DB.prepare('INSERT INTO users (username, password, avatar_url) VALUES (?, ?, ?)')
+        .bind(username, password, '')
+        .run();
       return jsonResponse({ success: true });
     }
 
+    // ============================================================
     // LOGIN
+    // ============================================================
     if (path === '/login' && method === 'POST') {
       const { username, password } = await request.json();
       if (!username || !password) return textResponse('Missing fields', 400);
-      
-      const user = await env.DB.prepare('SELECT * FROM users WHERE username = ?').bind(username).first();
+
+      const user = await env.DB.prepare('SELECT * FROM users WHERE username = ?')
+        .bind(username)
+        .first();
       if (!user || user.password !== password) {
         return textResponse('Invalid username or password', 401);
       }
-      
-      await env.DB.prepare('UPDATE users SET last_seen = ? WHERE username = ?').bind(Date.now(), username).run();
-      
-      return jsonResponse({ 
-        success: true, 
-        id: user.id, 
-        username: user.username, 
-        avatar_url: user.avatar_url || '' 
+
+      await env.DB.prepare('UPDATE users SET last_seen = ? WHERE username = ?')
+        .bind(Date.now(), username)
+        .run();
+
+      return jsonResponse({
+        success: true,
+        id: user.id,
+        username: user.username,
+        avatar_url: user.avatar_url || '',
       });
     }
 
+    // ============================================================
     // HEARTBEAT
+    // ============================================================
     if (path === '/heartbeat' && method === 'POST') {
       const { username } = await request.json();
       if (!username) return textResponse('Missing username', 400);
-      await env.DB.prepare('UPDATE users SET last_seen = ? WHERE username = ?').bind(Date.now(), username).run();
+      await env.DB.prepare('UPDATE users SET last_seen = ? WHERE username = ?')
+        .bind(Date.now(), username)
+        .run();
       return textResponse('OK');
     }
 
-    // FRIENDS
-    if (path === '/friends' && method === 'POST') {
-      const { username } = await request.json();
+    // ============================================================
+    // FRIENDS (GEÄNDERT: POST → GET)
+    // ============================================================
+    if (path === '/friends' && method === 'GET') {
+      const username = url.searchParams.get('username');
       if (!username) return textResponse('Missing username', 400);
-      
-      const user = await env.DB.prepare('SELECT id FROM users WHERE username = ?').bind(username).first();
+
+      const user = await env.DB.prepare('SELECT id FROM users WHERE username = ?')
+        .bind(username)
+        .first();
       if (!user) return textResponse('User not found', 404);
 
       const friends = await env.DB.prepare(
@@ -276,63 +331,95 @@ export default {
          FROM users u 
          JOIN friends f ON f.friend_id = u.id 
          WHERE f.user_id = ? AND f.status = 'accepted'`
-      ).bind(user.id).all();
+      )
+        .bind(user.id)
+        .all();
 
       const requests = await env.DB.prepare(
         `SELECT u.username 
          FROM users u 
          JOIN friends f ON f.user_id = u.id 
          WHERE f.friend_id = ? AND f.status = 'pending'`
-      ).bind(user.id).all();
+      )
+        .bind(user.id)
+        .all();
 
       return jsonResponse({ friends: friends.results, requests: requests.results });
     }
 
+    // ============================================================
     // ADD FRIEND
+    // ============================================================
     if (path === '/add-friend' && method === 'POST') {
       const { myUsername, friendUsername } = await request.json();
       if (!myUsername || !friendUsername) return textResponse('Missing fields', 400);
 
-      const me = await env.DB.prepare('SELECT id FROM users WHERE username = ?').bind(myUsername).first();
-      const friend = await env.DB.prepare('SELECT id FROM users WHERE username = ?').bind(friendUsername).first();
+      const me = await env.DB.prepare('SELECT id FROM users WHERE username = ?')
+        .bind(myUsername)
+        .first();
+      const friend = await env.DB.prepare('SELECT id FROM users WHERE username = ?')
+        .bind(friendUsername)
+        .first();
       if (!me || !friend) return textResponse('User not found', 404);
       if (me.id === friend.id) return textResponse('Cannot add yourself', 400);
 
       const existing = await env.DB.prepare(
         'SELECT id FROM friends WHERE (user_id = ? AND friend_id = ?) OR (user_id = ? AND friend_id = ?)'
-      ).bind(me.id, friend.id, friend.id, me.id).first();
+      )
+        .bind(me.id, friend.id, friend.id, me.id)
+        .first();
       if (existing) return textResponse('Already friends or request pending', 400);
 
-      await env.DB.prepare('INSERT INTO friends (user_id, friend_id, status) VALUES (?, ?, ?)').bind(me.id, friend.id, 'pending').run();
+      await env.DB.prepare('INSERT INTO friends (user_id, friend_id, status) VALUES (?, ?, ?)')
+        .bind(me.id, friend.id, 'pending')
+        .run();
       return textResponse('Friend request sent');
     }
 
+    // ============================================================
     // RESPOND FRIEND
+    // ============================================================
     if (path === '/respond-friend' && method === 'POST') {
       const { myUsername, requesterUsername, accept } = await request.json();
       if (!myUsername || !requesterUsername) return textResponse('Missing fields', 400);
 
-      const me = await env.DB.prepare('SELECT id FROM users WHERE username = ?').bind(myUsername).first();
-      const requester = await env.DB.prepare('SELECT id FROM users WHERE username = ?').bind(requesterUsername).first();
+      const me = await env.DB.prepare('SELECT id FROM users WHERE username = ?')
+        .bind(myUsername)
+        .first();
+      const requester = await env.DB.prepare('SELECT id FROM users WHERE username = ?')
+        .bind(requesterUsername)
+        .first();
       if (!me || !requester) return textResponse('User not found', 404);
 
       if (accept) {
-        await env.DB.prepare('UPDATE friends SET status = ? WHERE user_id = ? AND friend_id = ?').bind('accepted', requester.id, me.id).run();
-        await env.DB.prepare('INSERT INTO friends (user_id, friend_id, status) VALUES (?, ?, ?)').bind(me.id, requester.id, 'accepted').run();
+        await env.DB.prepare('UPDATE friends SET status = ? WHERE user_id = ? AND friend_id = ?')
+          .bind('accepted', requester.id, me.id)
+          .run();
+        await env.DB.prepare('INSERT INTO friends (user_id, friend_id, status) VALUES (?, ?, ?)')
+          .bind(me.id, requester.id, 'accepted')
+          .run();
         return textResponse('Friend request accepted');
       } else {
-        await env.DB.prepare('DELETE FROM friends WHERE user_id = ? AND friend_id = ?').bind(requester.id, me.id).run();
+        await env.DB.prepare('DELETE FROM friends WHERE user_id = ? AND friend_id = ?')
+          .bind(requester.id, me.id)
+          .run();
         return textResponse('Friend request declined');
       }
     }
 
+    // ============================================================
     // MESSAGES
+    // ============================================================
     if (path === '/messages' && method === 'POST') {
       const { myUsername, otherUsername } = await request.json();
       if (!myUsername || !otherUsername) return textResponse('Missing fields', 400);
 
-      const me = await env.DB.prepare('SELECT id FROM users WHERE username = ?').bind(myUsername).first();
-      const other = await env.DB.prepare('SELECT id FROM users WHERE username = ?').bind(otherUsername).first();
+      const me = await env.DB.prepare('SELECT id FROM users WHERE username = ?')
+        .bind(myUsername)
+        .first();
+      const other = await env.DB.prepare('SELECT id FROM users WHERE username = ?')
+        .bind(otherUsername)
+        .first();
       if (!me || !other) return textResponse('User not found', 404);
 
       const msgs = await env.DB.prepare(
@@ -341,33 +428,44 @@ export default {
          JOIN users sender ON m.sender_id = sender.id
          WHERE (m.sender_id = ? AND m.receiver_id = ?) OR (m.sender_id = ? AND m.receiver_id = ?)
          ORDER BY m.created_at ASC`
-      ).bind(me.id, other.id, other.id, me.id).all();
+      )
+        .bind(me.id, other.id, other.id, me.id)
+        .all();
 
       return jsonResponse(msgs.results);
     }
 
+    // ============================================================
     // SEND (HTTP-Fallback)
+    // ============================================================
     if (path === '/send' && method === 'POST') {
       const { senderUsername, receiverUsername, text } = await request.json();
       if (!senderUsername || !receiverUsername || !text) return textResponse('Missing fields', 400);
 
-      const sender = await env.DB.prepare('SELECT id FROM users WHERE username = ?').bind(senderUsername).first();
-      const receiver = await env.DB.prepare('SELECT id FROM users WHERE username = ?').bind(receiverUsername).first();
+      const sender = await env.DB.prepare('SELECT id FROM users WHERE username = ?')
+        .bind(senderUsername)
+        .first();
+      const receiver = await env.DB.prepare('SELECT id FROM users WHERE username = ?')
+        .bind(receiverUsername)
+        .first();
       if (!sender || !receiver) return textResponse('User not found', 404);
 
       await env.DB.prepare('INSERT INTO messages (sender_id, receiver_id, text, created_at) VALUES (?, ?, ?, ?)')
-        .bind(sender.id, receiver.id, text, Date.now()).run();
+        .bind(sender.id, receiver.id, text, Date.now())
+        .run();
 
       try {
         const roomName = `dm_${[senderUsername, receiverUsername].sort().join('_')}`;
         const roomId = env.CHAT_ROOM.idFromName(roomName);
         const roomObject = env.CHAT_ROOM.get(roomId);
-        
-        await roomObject.fetch(new Request('https://dummy/send', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ sender: senderUsername, text: text })
-        }));
+
+        await roomObject.fetch(
+          new Request('https://dummy/send', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sender: senderUsername, text: text }),
+          })
+        );
       } catch (doError) {
         console.warn('Durable Object nicht erreichbar, Nachricht nur in D1 gespeichert.');
       }
@@ -375,24 +473,32 @@ export default {
       return textResponse('OK');
     }
 
-    // GROUPS
-    if (path === '/my-groups' && method === 'POST') {
-      const { username } = await request.json();
+    // ============================================================
+    // MY-GROUPS (GEÄNDERT: POST → GET)
+    // ============================================================
+    if (path === '/my-groups' && method === 'GET') {
+      const username = url.searchParams.get('username');
       if (!username) return textResponse('Missing username', 400);
 
-      const user = await env.DB.prepare('SELECT id FROM users WHERE username = ?').bind(username).first();
+      const user = await env.DB.prepare('SELECT id FROM users WHERE username = ?')
+        .bind(username)
+        .first();
       if (!user) return textResponse('User not found', 404);
 
       const groups = await env.DB.prepare(
         `SELECT g.id, g.name FROM groups g
          JOIN group_members gm ON gm.group_id = g.id
          WHERE gm.user_id = ?`
-      ).bind(user.id).all();
+      )
+        .bind(user.id)
+        .all();
 
       return jsonResponse(groups.results);
     }
 
+    // ============================================================
     // GROUP MESSAGES
+    // ============================================================
     if (path === '/group-messages' && method === 'POST') {
       const { groupId } = await request.json();
       if (!groupId) return textResponse('Missing groupId', 400);
@@ -403,32 +509,41 @@ export default {
          JOIN users u ON gm.sender_id = u.id
          WHERE gm.group_id = ?
          ORDER BY gm.created_at ASC`
-      ).bind(groupId).all();
+      )
+        .bind(groupId)
+        .all();
 
       return jsonResponse(msgs.results);
     }
 
+    // ============================================================
     // GROUP SEND
+    // ============================================================
     if (path === '/group-send' && method === 'POST') {
       const { groupId, senderUsername, text } = await request.json();
       if (!groupId || !senderUsername || !text) return textResponse('Missing fields', 400);
 
-      const sender = await env.DB.prepare('SELECT id FROM users WHERE username = ?').bind(senderUsername).first();
+      const sender = await env.DB.prepare('SELECT id FROM users WHERE username = ?')
+        .bind(senderUsername)
+        .first();
       if (!sender) return textResponse('User not found', 404);
 
       await env.DB.prepare('INSERT INTO group_messages (group_id, sender_id, text, created_at) VALUES (?, ?, ?, ?)')
-        .bind(groupId, sender.id, text, Date.now()).run();
+        .bind(groupId, sender.id, text, Date.now())
+        .run();
 
       try {
         const roomName = `group_${groupId}`;
         const roomId = env.CHAT_ROOM.idFromName(roomName);
         const roomObject = env.CHAT_ROOM.get(roomId);
-        
-        await roomObject.fetch(new Request('https://dummy/send', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ sender: senderUsername, text: text })
-        }));
+
+        await roomObject.fetch(
+          new Request('https://dummy/send', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sender: senderUsername, text: text }),
+          })
+        );
       } catch (doError) {
         console.warn('Durable Object nicht erreichbar, Nachricht nur in D1 gespeichert.');
       }
@@ -436,6 +551,9 @@ export default {
       return textResponse('OK');
     }
 
+    // ============================================================
+    // FALLBACK
+    // ============================================================
     return new Response('Not found', { status: 404, headers: corsHeaders });
-  }
+  },
 };
