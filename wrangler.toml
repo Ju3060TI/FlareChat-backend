@@ -6,10 +6,10 @@ compatibility_date = "2025-04-01"
 compatibility_flags = ["nodejs_compat"]
 
 # ============================================================
-# ROUTING (WICHTIG FÜR API!)
+# ROUTING (KRITISCH FÜR API!)
 # ============================================================
+run_worker_first = true  # ← ZWINGT WORKER VOR STATISCHEN DATEIEN!
 not_found_handling = "single-page-application"
-run_worker_first = true  # ← ZWINGT WORKER-LOGIK VOR STATISCHEN DATEIEN!
 
 # ============================================================
 # D1 DATABASE
@@ -17,7 +17,7 @@ run_worker_first = true  # ← ZWINGT WORKER-LOGIK VOR STATISCHEN DATEIEN!
 [[d1_databases]]
 binding = "DB"
 database_name = "flarechat"
-database_id = "0811f1e4-1972-474a-a070-4a1098ab8edc"  # ← DEINE ECHTE ID!
+database_id = "0811f1e4-1972-474a-a070-4a1098ab8edc"
 
 # ============================================================
 # DURABLE OBJECT BINDING
