@@ -1,33 +1,43 @@
 # wrangler.toml
+# FlareChat Backend – mit Durable Objects, D1, aber ohne Firebase (optional)
 
 name = "flarechat-backend"
 main = "src/index.js"
 compatibility_date = "2024-01-01"
 
-# D1-Datenbank
+# ============================================================
+# D1 DATABASE (PFICHT!)
+# ============================================================
 [[d1_databases]]
 binding = "DB"
 database_name = "flarechat-db"
-database_id = "deine-d1-datenbank-id"
+database_id = "deine-d1-datenbank-id"  # ← HIER DEINE ECHTE ID EINTRAGEN!
 
 # ============================================================
-# DURABLE OBJECT BINDING
+# DURABLE OBJECT BINDING (PFICHT!)
 # ============================================================
 [[durable_objects.bindings]]
 name = "CHAT_ROOM"
 class_name = "ChatRoom"
 
 # ============================================================
-# MIGRATION: SQLite-Datenbank für Durable Object
+# MIGRATION: SQLite-Datenbank für Durable Object (PFICHT!)
 # ============================================================
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["ChatRoom"]
 
 # ============================================================
-# UMWELTVARIABLEN
+# UMWELTVARIABLEN (OPTIONAL)
 # ============================================================
-[vars]
-FIREBASE_PROJECT_ID = "dein-project-id"
-FIREBASE_PRIVATE_KEY = "dein-private-key"
-FIREBASE_CLIENT_EMAIL = "deine-email@example.com"
+# Firebase ist AUSKOMMENTIERT – du kannst es später aktivieren:
+# [vars]
+# FIREBASE_PROJECT_ID = "dein-project-id"
+# FIREBASE_PRIVATE_KEY = "dein-private-key"
+# FIREBASE_CLIENT_EMAIL = "deine-email@example.com"
+
+# ============================================================
+# ENTWICKLUNG (OPTIONAL)
+# ============================================================
+[dev]
+port = 8787
