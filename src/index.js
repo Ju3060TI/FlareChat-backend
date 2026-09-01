@@ -1,9 +1,6 @@
 // src/index.js
 // Cloudflare Worker mit WebSocket-Unterstützung (Durable Objects)
 
-import { initializeApp, getApps } from 'firebase-admin/app';
-import { getAuth } from 'firebase-admin/auth';
-
 // ============================================================
 // CORS-HEADER
 // ============================================================
@@ -65,11 +62,6 @@ export default {
     }
 
     // ============================================================
-    // 🔥 FIREBASE TOGGLE
-    // ============================================================
-    const firebaseEnabled = !!(env.FIREBASE_PROJECT_ID && env.FIREBASE_PRIVATE_KEY);
-
-    // ============================================================
     // REGISTER
     // ============================================================
     if (path === '/register' && method === 'POST') {
@@ -86,13 +78,9 @@ export default {
     }
 
     // ============================================================
-    // LOGIN (FALLBACK: D1-Passwort)
+    // LOGIN
     // ============================================================
     if (path === '/login' && method === 'POST') {
-      if (firebaseEnabled) {
-        return textResponse('Please use Google Login (Firebase is enabled)', 403);
-      }
-
       const { username, password } = await request.json();
       if (!username || !password) return textResponse('Missing fields', 400);
       
@@ -109,50 +97,6 @@ export default {
         username: user.username, 
         avatar_url: user.avatar_url || '' 
       });
-    }
-
-    // ============================================================
-    // 🔥 FIREBASE LOGIN
-    // ============================================================
-    if (path === '/auth/login' && method === 'POST') {
-      if (!firebaseEnabled) {
-        return textResponse('Firebase is not enabled. Use /login instead.', 501);
-      }
-
-      if (!getApps().length) {
-        initializeApp({
-          projectId: env.FIREBASE_PROJECT_ID,
-          privateKey: env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n'),
-          clientEmail: env.FIREBASE_CLIENT_EMAIL,
-        });
-      }
-
-      const { idToken } = await request.json();
-      if (!idToken) return textResponse('Missing idToken', 400);
-
-      try {
-        const decodedToken = await getAuth().verifyIdToken(idToken);
-        const { uid, email, name, picture } = decodedToken;
-
-        let dbUser = await env.DB.prepare('SELECT * FROM users WHERE firebase_uid = ?').bind(uid).first();
-        if (!dbUser) {
-          const username = email.split('@')[0] || 'user_' + uid.slice(0, 6);
-          await env.DB.prepare(
-            'INSERT INTO users (firebase_uid, username, email, avatar_url, created_at) VALUES (?, ?, ?, ?, ?)'
-          ).bind(uid, username, email, picture || '', Date.now()).run();
-          dbUser = await env.DB.prepare('SELECT * FROM users WHERE firebase_uid = ?').bind(uid).first();
-        }
-
-        return jsonResponse({
-          success: true,
-          username: dbUser.username,
-          avatar_url: dbUser.avatar_url,
-          firebase_uid: dbUser.firebase_uid,
-        });
-      } catch (error) {
-        console.error('Firebase auth error:', error);
-        return textResponse('Invalid Firebase token', 401);
-      }
     }
 
     // ============================================================
