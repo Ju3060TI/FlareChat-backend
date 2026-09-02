@@ -8,7 +8,7 @@ compatibility_flags = ["nodejs_compat"]
 # ============================================================
 # ROUTING (KRITISCH FÜR API!)
 # ============================================================
-run_worker_first = true  # ← ZWINGT WORKER VOR STATISCHEN DATEIEN!
+run_worker_first = true
 not_found_handling = "single-page-application"
 
 # ============================================================
